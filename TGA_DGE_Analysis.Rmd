@@ -1,0 +1,366 @@
+---
+title: "[mRNA] Transposition of the Great Arteries (TGA) with Systemic Right Ventricle (RV) and Systemic Left Ventricle (LV) DGE Analysis"
+author: "Sara Tahir"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Overview
+This pipeline analyzes the transcriptomic response of Transposition of the Great Arteries (TGA) in patients with systemic right and left ventricles, RV and LV, respectively. This dataset includes both mRNA and miRNA, and the analysis will include their interaction and sex stratfication.
+
+**Platform:** Agilent-072363 SurePrint G3 Human GE v3 8x60K Microarray 039494 [Feature Number Version]
+
+**Design:** 16 Controls (11 males, 5 females), 16 TGA-LV patients (11 males, 5 females), 16 TGA-RV (11 males, 5 females)
+
+## Setup and Read data
+```{r package-setup, message = FALSE}
+# Load/Install Manager
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse, gplots, here, ggplot2,      # CRAN
+  GEOquery, limma, edgeR, sva # Bioconductor
+)
+```
+
+```{r read-data, message = FALSE}
+# Read in geo dataset
+geo_data <- getGEO(filename = "GSE215939_series_matrix.txt")
+metadata <- pData(geo_data)
+
+files <- list.files(path = "./GSE215939_RAW", pattern = "\\.txt$", full.names = TRUE)
+x <- read.maimages(files, source="agilent", green.only = TRUE, other.columns="gIsWellAboveBG")
+colnames(x$E) <- gsub("^.*/(GSM[0-9]+)_.*$", "\\1", colnames(x))
+colnames(x$Eb) <- gsub("^.*/(GSM[0-9]+)_.*$", "\\1", colnames(x))
+```
+## Pre-Normalization
+Save MA plots, view distribution before and after normalization
+```{r pre-normalization}
+plotMA3by2(x)
+
+signal_data_frame <- stack(as.data.frame(log2(x$E)))
+background_data_frame <- stack(as.data.frame(log2(x$Eb)))
+
+ggplot(signal_data_frame) +
+  geom_boxplot(aes(x = ind, y = values)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  ggtitle("Signal")
+
+ggplot(background_data_frame) +
+  geom_boxplot(aes(x = ind, y = values))  +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  ggtitle("Background")
+```
+
+## Processing and Normalization
+```{r normalization}
+# Standard agilent microarray data processing
+y <- backgroundCorrect(x, method="normexp")
+y <- normalizeBetweenArrays(y, method="quantile")
+
+Control <- y$genes$ControlType==1L
+smallestGroupSize <- 5 # Female group size is 5
+IsExpr <- rowSums(y$other$gIsWellAboveBG > 0) >= smallestGroupSize
+notProbe <- !grepl("^A_", y$genes$GeneName)
+yfilt <- y[!Control & IsExpr &notProbe, ]
+
+# Create boxplot for normalized data
+signal_data_frame <- stack(as.data.frame(yfilt$E))
+ggplot(signal_data_frame) +
+  geom_boxplot(aes(x = ind, y = values)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  ggtitle("Signal Normalized")
+```
+
+## Intensity Filtering
+```{r instensity-filtering}
+# Average expression for every probe across all samples
+probe_means <- rowMeans(yfilt$E)
+# Density distribution of averages
+plot(density(probe_means), 
+     main = "Density of Probe Average Intensities", 
+     xlab = "Log2 Intensity (Quantile Normalized)")
+# Red line at the log2 threshold 
+threshold <- 18
+abline(v = log2(threshold), col = "red", lwd = 2, lty = 2)
+keep_intensity <- rowMeans(yfilt$E) > log2(threshold)
+yfilt <- yfilt[keep_intensity, ]
+```
+
+## Metadata formatting
+```{r metadata-formatting}
+accession_to_subject <- setNames( metadata$title, metadata$geo_accession)
+colnames(yfilt) <- accession_to_subject[colnames(yfilt)]
+
+# Turn TGA-LV to TGALV
+metadata$source_name_ch1 <- gsub("-", "", metadata$source_name_ch1)
+# Ensure data is aligned
+metadata <- metadata[match(colnames(yfilt), metadata$title), ]
+all(metadata$title == colnames(yfilt)) # Should return true
+```
+
+## Sample Quality Control
+Used hierarchical clustering and PCA plots
+``` {r sample-qc}
+# Hierarchical clustering
+dist_mat <- dist(t(yfilt$E))
+hclust_res <- hclust(dist_mat)
+
+group_labels <- paste(metadata$source_name_ch1, metadata$`gender:ch1`, sep = "_")
+
+plot(hclust_res, 
+     labels = group_labels,
+     main = "Hierarchical Clustering of Samples", 
+     xlab = "Samples", 
+     sub = "", 
+     cex = 0.6)
+
+# Calculate variance for all genes across all samples
+gene_vars <- apply(yfilt$E, 1, var, na.rm = TRUE)
+# Grab top 500 genes
+top_indices <- order(gene_vars, decreasing = TRUE)[1:500]
+dist_mat_top <- dist(t(yfilt$E[top_indices, ]))
+plot(hclust(dist_mat_top), 
+     labels = group_labels, 
+     main = "Hierarchical Clustering (Top 500 Variable Genes)", 
+     cex = 0.6)
+
+# Generate gene heatmap
+heatmap_matrix <- yfilt$E[top_indices, ]
+colnames(heatmap_matrix) <- group_labels
+heatmap.2(heatmap_matrix, 
+          trace = "none",         
+          scale = "row",          
+          col = colorRampPalette(c("blue", "white", "red"))(50),
+          main = "Top 500 Variable Genes",
+          cexCol = 0.6, 
+          labRow = FALSE,         # CRITICAL VISUAL FIX: Hides the 500 overlapping row names
+          margins = c(10, 5))
+
+# PCA Plots
+pca_res <- prcomp(t(yfilt$E), scale. = TRUE)
+pca_df <- as.data.frame(pca_res$x)
+pca_plot_data <- cbind(pca_df, metadata)
+
+# Scree Plot
+pca_res.var <- pca_res$sdev^2
+pca_res.var.per <- round(pca_res.var/sum(pca_res.var)*100,1)
+barplot(pca_res.var.per, main = "Scree Plot", xlab = "Principal Component", ylab = "Percent Variation")
+
+# Create a combined grouping variable for the colors
+pca_plot_data$Group <- paste(pca_plot_data$source_name_ch1, pca_plot_data$`gender:ch1`, sep = "_")
+
+ggplot(pca_plot_data, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 4, alpha = 0.8) +
+  theme_bw() +
+  
+  # Assign complementary light/dark shades so the diseases group visually
+  scale_color_manual(
+    name = "Disease & Sex",
+    values = c(
+      "Control_Female" = "darkgray", 
+      "Control_Male" = "black", 
+      "TGALV_Female" = "deepskyblue", 
+      "TGALV_Male" = "darkblue",
+      "TGARV_Female" = "lightcoral",
+      "TGARV_Male" = "firebrick"
+    )
+  ) +
+  
+  labs(
+    title = "PCA Plot",
+    x = paste0("PC1 (", round(summary(pca_res)$importance[2,1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(summary(pca_res)$importance[2,2] * 100, 1), "%)")
+  )
+```
+
+## Batch Correction
+Use SVA
+``` {r batch-correction}
+group <- factor(paste(metadata$source_name_ch1, metadata$`gender:ch1`, sep = "_"))
+
+mod  <- model.matrix(~ group, data = metadata)          # Full model (with intercept)
+mod0 <- model.matrix(~ 1, data = metadata) # Null model (intercept only)
+
+svobj <- sva(yfilt$E, mod, mod0)
+
+design <- model.matrix(~ 0 + group)
+colnames(design) <- gsub("group", "", colnames(design))
+
+if(svobj$n.sv > 0) {
+  # If SVA found hidden batches, append them as new columns (SV1, SV2, etc.)
+  design <- cbind(design, svobj$sv)
+  colnames(design)[(ncol(design) - svobj$n.sv + 1):ncol(design)] <- paste0("SV", 1:svobj$n.sv)
+  message(paste("SVA found and isolated", svobj$n.sv, "hidden batch effect(s)."))
+} else {
+  message("SVA found 0 hidden batches.")
+}
+```
+
+## Post Batch Correction QC
+```{r batch-correction-qc}
+yfilt_clean <- removeBatchEffect(yfilt$E, 
+                                 covariates = svobj$sv, 
+                                 design = mod)
+pca_clean <- prcomp(t(yfilt_clean), scale. = TRUE)
+pca_df_clean <- as.data.frame(pca_clean$x)
+pca_plot_data_clean <- cbind(pca_df_clean, metadata)
+
+pca_plot_data_clean$Group <- paste(pca_plot_data_clean$source_name_ch1, 
+                                   pca_plot_data_clean$`gender:ch1`, sep = "_")
+
+# Plot it
+ggplot(pca_plot_data_clean, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 4, alpha = 0.8) +
+  theme_bw() +
+  scale_color_manual(
+    name = "Disease & Sex",
+    values = c("Control_Female" = "darkgray", "Control_Male" = "black", 
+               "TGALV_Female" = "deepskyblue", "TGALV_Male" = "darkblue",
+               "TGARV_Female" = "lightcoral", "TGARV_Male" = "firebrick")
+  ) +
+  labs(
+    title = "PCA Plot (Post-SVA Batch Correction)",
+    x = paste0("PC1 (", round(summary(pca_clean)$importance[2,1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(summary(pca_clean)$importance[2,2] * 100, 1), "%)")
+  )
+
+# 3. Post-SVA Hierarchical Clustering
+# Calculate the distance matrix on the clean data
+dist_mat_clean <- dist(t(yfilt_clean))
+hclust_clean <- hclust(dist_mat_clean)
+
+# Plot the clean dendrogram
+plot(hclust_clean, 
+     labels = pca_plot_data_clean$Group,
+     main = "Hierarchical Clustering (Post-SVA)", 
+     xlab = "Samples", 
+     sub = "", 
+     cex = 0.6)
+
+######## Just look at the top 500 genes
+gene_vars_clean <- apply(yfilt_clean, 1, var, na.rm = TRUE)
+top_indices_clean <- order(gene_vars_clean, decreasing = TRUE)[1:500]
+yfilt_clean_top500 <- yfilt_clean[top_indices_clean, ]
+
+pca_top500 <- prcomp(t(yfilt_clean_top500), scale. = TRUE)
+pca_df_top500 <- as.data.frame(pca_top500$x)
+pca_plot_data_top500 <- cbind(pca_df_top500, metadata)
+
+# Ensure the Group column is formatted
+pca_plot_data_top500$Group <- paste(pca_plot_data_top500$source_name_ch1, 
+                                    pca_plot_data_top500$`gender:ch1`, sep = "_")
+
+ggplot(pca_plot_data_top500, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 4, alpha = 0.8) +
+  theme_bw() +
+  scale_color_manual(
+    name = "Disease & Sex",
+    values = c("Control_Female" = "darkgray", "Control_Male" = "black", 
+               "TGALV_Female" = "deepskyblue", "TGALV_Male" = "darkblue",
+               "TGARV_Female" = "lightcoral", "TGARV_Male" = "firebrick")
+  ) +
+  labs(
+    title = "PCA Plot: Top 500 Most Variable Genes (Post-SVA)",
+    x = paste0("PC1 (", round(summary(pca_top500)$importance[2,1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(summary(pca_top500)$importance[2,2] * 100, 1), "%)")
+  )
+
+dist_mat_top500 <- dist(t(yfilt_clean_top500))
+hclust_top500 <- hclust(dist_mat_top500)
+
+plot(hclust_top500, 
+     labels = pca_plot_data_top500$Group,
+     main = "Hierarchical Clustering: Top 500 Genes (Post-SVA)", 
+     xlab = "Samples", 
+     sub = "", 
+     cex = 0.6)
+
+heatmap_matrix_clean <- yfilt_clean_top500
+colnames(heatmap_matrix_clean) <- pca_plot_data_top500$Group
+
+heatmap.2(heatmap_matrix_clean, 
+          trace = "none",         
+          scale = "row",          
+          col = colorRampPalette(c("dodgerblue", "white", "firebrick"))(50),
+          main = "Top 500 Variable Genes (Post-SVA)",
+          cexCol = 0.6, 
+          labRow = FALSE,  # Hides the 500 gene names so the plot isn't a black smudge       
+          margins = c(10, 5))
+```
+
+## Limma DGE
+```{r limma}
+rownames(design) <- colnames(yfilt)
+
+contrast_matrix <- makeContrasts(
+  TGA_LV_Female_vs_Control_Female = TGALV_Female - Control_Female,
+  TGA_LV_Male_vs_Control_Male = TGALV_Male - Control_Male,
+  TGA_RV_Female_vs_Control_Female = TGARV_Female - Control_Female,
+  TGA_RV_Male_vs_Control_Male = TGARV_Male - Control_Male,
+  levels = design
+)
+
+# Fix heteroscedasticity
+aw <- arrayWeights(yfilt, design)
+barplot(aw, main="Array Weights per Patient", ylab="Weight", las=2, cex.names=0.5)
+abline(h=1, lty=2, col="red")
+
+fit <- lmFit(yfilt, design = design, weights = aw)
+
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2, robust = T)
+
+# View Summaries
+resultsSummary <- decideTests(fit2)
+print(summary(resultsSummary))
+vennDiagram(resultsSummary, cex = c(1, 0.6, 1))
+```
+
+## Post-Analysis and Result Generation
+```{r post-analysis}
+# Load the official HGNC list for validation (Keep this exactly as you had it)
+hgnc_complete_set_df <- read_tsv("hgnc_complete_set.txt", show_col_types = FALSE) %>%
+  dplyr::select(HGNC_Symbol = symbol)
+
+contrasts_list <- colnames(contrast_matrix)
+
+for (contrast_name in contrasts_list) {
+  res_df <- topTable(fit2, coef = contrast_name, number = Inf) 
+  
+  # Clean and format the Agilent output
+  res_df_clean <- res_df %>%
+    dplyr::rename(HGNC_Symbol = GeneName) %>%               
+    dplyr::filter(!is.na(HGNC_Symbol) & HGNC_Symbol != "")  
+  
+  # Validate against the official HGNC list
+  joined_results <- res_df_clean %>%
+    dplyr::inner_join(hgnc_complete_set_df, by = "HGNC_Symbol")
+  
+  # Handle duplicates: Sort by p-value, keep only the most biologically significant probe per gene
+  final_results_table <- joined_results %>%
+    dplyr::arrange(adj.P.Val) %>% 
+    dplyr::distinct(HGNC_Symbol, .keep_all = TRUE)
+  
+  # Final formatting for the CSV
+  final_results_table <- final_results_table %>%
+    dplyr::select(HGNC_Symbol, logFC, P.Value, adj.P.Val) %>%
+    dplyr::rename(P.value = adj.P.Val) %>%
+    dplyr::filter(!is.na(P.value))
+  
+  # Save to CSV
+  file_name <- paste0("dge_results_", contrast_name, "_final.csv")
+  write_csv(final_results_table, file_name)
+  
+  message(paste("Saved:", file_name))
+}
+```
+
+
+
+
+
+
