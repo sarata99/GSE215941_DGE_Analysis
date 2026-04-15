@@ -1,5 +1,5 @@
 ---
-title: "[miRNA] Transposition of the Great Arteries (TGA) with Systemic Right Ventricle (RV) and Systemic Left Ventricle (LV) DGE Analysis"
+title: "[mRNA] Transposition of the Great Arteries (TGA) with Systemic Right Ventricle (RV) and Systemic Left Ventricle (LV) DGE Analysis"
 author: "Sara Tahir"
 date: "`r Sys.Date()`"
 output: html_document
@@ -10,9 +10,9 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## Project Overview
-This pipeline analyzes the transcriptomic response of Transposition of the Great Arteries (TGA) in patients with systemic right and left ventricles, RV and LV, respectively. This dataset includes both mRNA and miRNA, and the analysis will include their interaction and sex stratfication.
+This pipeline analyzes the transcriptomic response of Transposition of the Great Arteries (TGA) in patients with systemic right and left ventricles, RV and LV, respectively. This dataset includes both mRNA and miRNA, and the analysis will include their interaction and sex stratification.
 
-**Platform:** Agilent-070156 Human_miRNA_V21.0_Microarray 046064 (Probe Name version)
+**Platform:** Agilent-072363 SurePrint G3 Human GE v3 8x60K Microarray 039494 [Feature Number Version]
 
 **Design:** 16 Controls (11 males, 5 females), 16 TGA-LV patients (11 males, 5 females), 16 TGA-RV (11 males, 5 females)
 
@@ -28,15 +28,14 @@ pacman::p_load(
 
 ```{r read-data, message = FALSE}
 # Read in geo dataset
-geo_data <- getGEO(filename = "GSE215940_series_matrix.txt")
+geo_data <- getGEO(filename = "GSE215939_series_matrix.txt")
 metadata <- pData(geo_data)
 
-files <- list.files(path = "./GSE215940_RAW", pattern = "\\.txt$", full.names = TRUE)
+files <- list.files(path = "./GSE215939_RAW", pattern = "\\.txt$", full.names = TRUE)
 x <- read.maimages(files, source="agilent", green.only = TRUE, other.columns="gIsWellAboveBG")
 colnames(x$E) <- gsub("^.*/(GSM[0-9]+)_.*$", "\\1", colnames(x))
 colnames(x$Eb) <- gsub("^.*/(GSM[0-9]+)_.*$", "\\1", colnames(x))
 ```
-
 ## Pre-Normalization
 Save MA plots, view distribution before and after normalization
 ```{r pre-normalization}
@@ -55,21 +54,19 @@ ggplot(background_data_frame) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
   ggtitle("Background")
 ```
-
 ## Processing and Normalization
 ```{r normalization}
 # Standard agilent microarray data processing
 y <- backgroundCorrect(x, method="normexp")
 y <- normalizeBetweenArrays(y, method="quantile")
 
-# Average identical probes before filtering
-y_avg <- avereps(y, ID = y$genes$ProbeName)
-
-Control <- y_avg$genes$ControlType==1L
+Control <- y$genes$ControlType==1L
+# The filterByExpr equivalent for Agilent
+# Keep probes that are statistically above background in at least 5 patients (smallest group size)
 smallestGroupSize <- 5 # Female group size is 5
-IsExpr <- rowSums(y_avg$other$gIsWellAboveBG > 0) >= smallestGroupSize
-notProbe <- !grepl("^A_", y_avg$genes$GeneName)
-yfilt <- y_avg[!Control & IsExpr &notProbe, ]
+IsExpr <- rowSums(y$other$gIsWellAboveBG > 0) >= smallestGroupSize
+notProbe <- !grepl("^A_", y$genes$GeneName)
+yfilt <- y[!Control & IsExpr &notProbe, ]
 
 # Create boxplot for normalized data
 signal_data_frame <- stack(as.data.frame(yfilt$E))
@@ -80,7 +77,7 @@ ggplot(signal_data_frame) +
 
 # View density plot before and after filtering
 probe_means_clean <- rowMeans(yfilt$E)
-probe_means_original <- rowMeans(y_avg$E)
+probe_means_original <- rowMeans(y$E)
 dens_clean <- density(probe_means_clean)
 dens_original <- density(probe_means_original)
 
@@ -100,8 +97,8 @@ legend("topright",
        lty = c(2, 1))
 
 # Mean-Variance plot
-pre_mean <- rowMeans(y_avg$E)
-pre_sd <- apply(y_avg$E, 1, sd)
+pre_mean <- rowMeans(y$E)
+pre_sd <- apply(y$E, 1, sd)
 
 kept_mean <- rowMeans(yfilt$E)
 kept_sd <- apply(yfilt$E, 1, sd)
@@ -118,23 +115,8 @@ points(kept_mean, kept_sd,
 
 legend("topright", legend=c("Discarded Noise", "Kept Probes"), 
        col=c("black", "blue"), pch=16)
-```
 
-## Intensity Filtering
-```{r instensity-filtering}
-# Average expression for every probe across all samples
-#probe_means <- rowMeans(yfilt$E)
-# Density distribution of averages
-#plot(density(probe_means), 
-#     main = "Density of Probe Average Intensities", 
-#     xlab = "Log2 Intensity (Quantile Normalized)")
-# Red line at the log2 threshold 
-#threshold <- 55
-#abline(v = log2(threshold), col = "red", lwd = 2, lty = 2)
-#keep_intensity <- rowMeans(yfilt$E) > log2(threshold)
-#yfilt <- yfilt[keep_intensity, ]
 ```
-
 ## Metadata formatting
 ```{r metadata-formatting}
 accession_to_subject <- setNames( metadata$title, metadata$geo_accession)
@@ -169,7 +151,7 @@ Used hierarchical clustering and PCA plots
 dist_mat <- dist(t(yfilt$E))
 hclust_res <- hclust(dist_mat)
 
-group_labels <- paste(metadata$source_name_ch1, metadata$`gender:ch1`, sep = "_")
+group_labels <- paste(metadata$source_name_ch1, metadata$`gender:ch1`, metadata$title, sep = "_")
 
 plot(hclust_res, 
      labels = group_labels,
@@ -370,7 +352,7 @@ contrast_matrix <- makeContrasts(
 
 # Fix heteroscedasticity
 aw <- arrayWeights(yfilt, design)
-barplot(aw, main="Array Weights per Patient", ylab="Weight", las=2, cex.names=0.5)
+barplot(aw, main="Array Weights per Patient", ylab="Weight", las=2, cex.names=0.5, names.arg = colnames(yfilt))
 abline(h=1, lty=2, col="red")
 
 fit <- lmFit(yfilt, design = design, weights = aw)
@@ -386,23 +368,12 @@ vennDiagram(resultsSummary, cex = c(1, 0.6, 1))
 
 ## Post-Analysis and Result Generation
 ```{r post-analysis}
-output_dir <- "mirna_results"
+output_dir <- "mrna_results"
 dir.create(output_dir, showWarnings = FALSE)
 
-# Parse miRBase CSV 
-mirbase_df <- read_csv("miRNA.csv", show_col_types = FALSE)
-
-valid_mirnas <- mirbase_df %>%
-  # Target the exact columns you verified exist
-  dplyr::select(Mature1_ID, Mature2_ID) %>%
-  # Stack them into one single column
-  tidyr::pivot_longer(cols = everything(), values_to = "miRBase_ID") %>%
-  # Drop the empty cells
-  dplyr::filter(!is.na(miRBase_ID) & miRBase_ID != "") %>%
-  # Keep only Human mature miRNAs
-  dplyr::filter(grepl("^hsa-", miRBase_ID)) %>%
-  # Remove any duplicates just in case
-  dplyr::distinct(miRBase_ID)
+# Load the official HGNC list for validation (Keep this exactly as you had it)
+hgnc_complete_set_df <- read_tsv("hgnc_complete_set.txt", show_col_types = FALSE) %>%
+  dplyr::select(HGNC_Symbol = symbol)
 
 contrasts_list <- colnames(contrast_matrix)
 
@@ -411,23 +382,27 @@ for (contrast_name in contrasts_list) {
   
   # Clean and format the Agilent output
   res_df_clean <- res_df %>%
-    dplyr::rename(miRBase_ID = GeneName) %>%               
-    dplyr::filter(!is.na(miRBase_ID) & miRBase_ID != "")  
+    dplyr::rename(HGNC_Symbol = GeneName) %>%               
+    dplyr::filter(!is.na(HGNC_Symbol) & HGNC_Symbol != "")  
   
-  # Validate against the official miRBase mature list
+  # Validate against the official HGNC list
   joined_results <- res_df_clean %>%
-    dplyr::inner_join(valid_mirnas, by = "miRBase_ID")
+    dplyr::inner_join(hgnc_complete_set_df, by = "HGNC_Symbol")
+  
+  # Handle duplicates: Sort by p-value, keep only the most biologically significant probe per gene
+  final_results_table <- joined_results %>%
+    dplyr::arrange(adj.P.Val) %>% 
+    dplyr::distinct(HGNC_Symbol, .keep_all = TRUE)
   
   # Final formatting for the CSV
-  final_results_table <- joined_results %>%
-    dplyr::select(miRBase_ID, logFC, P.Value, adj.P.Val) %>%
+  final_results_table <- final_results_table %>%
+    dplyr::select(HGNC_Symbol, logFC, P.Value, adj.P.Val) %>%
     dplyr::filter(!is.na(adj.P.Val))
   
-  # Save CSV
-  file_name <- paste0(output_dir,"/dge_results_", contrast_name, "_miRNA_final.csv")
+  # Save to CSV
+  file_name <- paste0(output_dir, "/dge_results_", contrast_name, "_mRNA_final.csv")
   write_csv(final_results_table, file_name)
   
   message(paste("Saved:", file_name))
 }
 ```
-
